@@ -1,153 +1,651 @@
-<a href="https://livekit.io/">
-  <img src="./.github/assets/livekit-mark.png" alt="LiveKit logo" width="100" height="100">
-</a>
+# Interruptible Agent — Full-Duplex Voice Assistant
 
-# LiveKit Agents starter for Python
+**A full-duplex voice agent that can listen, respond, get interrupted, recover from stale intent, and safely execute actions.**
 
-A starter project for building voice AI apps with [LiveKit Agents for Python](https://github.com/livekit/agents) and [LiveKit Cloud](https://cloud.livekit.io/).
+This project is a LiveKit-based Python voice agent built for **Full-Duplex-Bench v3**. The main focus is not just getting a voice response out quickly, but handling the messy parts of real conversations: interruptions, corrections, tool calls, and actions that may already be in progress.
 
-The starter includes:
+It also includes **VisionGuide**, an end-to-end voice + vision extension that lets the agent query the user's current surroundings through a camera pipeline.
 
-- A simple [voice AI assistant](https://docs.livekit.io/agents/start/voice-ai/) to extend and customize.
-- A voice pipeline built on [LiveKit Inference](https://docs.livekit.io/agents/models/inference/), which gives you access to [models](https://docs.livekit.io/agents/models/) from top labs with no extra configuration:
-  - The default LLM is Gemma 4 31B, an open-weight model [hosted by LiveKit](https://docs.livekit.io/agents/models/llm/livekit/) and tuned for voice AI.
-  - The default TTS is [Fish Audio S2.1 Pro](https://docs.livekit.io/agents/models/tts/fishaudio/), an expressive and cost-effective voice.
-  - More than 50 other models are available from OpenAI, Cartesia, Deepgram, and other providers.
-  - [Realtime models](https://docs.livekit.io/agents/models/realtime/) and many others are available through the [plugin ecosystem](https://docs.livekit.io/agents/models/#plugins).
-- [Expressive mode](https://docs.livekit.io/agents/models/tts/expressive/), on by default, so your agent's voice carries emotion and pacing that fit the conversation.
-- [Keyterms](https://docs.livekit.io/agents/models/stt/keyterms/), on by default, so speech recognition gets your names, brands, and jargon right, including names it picks up during the conversation, like a caller's.
-- [LiveKit Turn Detector](https://docs.livekit.io/agents/logic/turns/turn-detector/), which knows when the user has finished speaking, in 14 languages.
-- [Adaptive interruption handling](https://docs.livekit.io/agents/logic/turns/adaptive-interruption-handling/), which tells a real interruption from an "uh-huh" or background noise, so your agent doesn't stop talking when it shouldn't.
-- [Background voice cancellation](https://docs.livekit.io/transport/media/noise-cancellation/).
-- Session transcripts, traces, and recordings from LiveKit [Agent Observability](https://docs.livekit.io/testing/observability/).
-- [Simulations](https://docs.livekit.io/testing/simulations/) that test full conversations with your agent, run in CI on every merge to `main`.
-- A `Dockerfile` for [deploying to LiveKit Cloud](https://docs.livekit.io/deploy/agents/).
+---
 
-The starter works with any [custom web or mobile frontend](https://docs.livekit.io/frontends/) or with [telephony](https://docs.livekit.io/telephony/).
+## Table of Contents
 
-## Using coding agents
+- [Project Overview](#project-overview)
+- [Problem Statement](#problem-statement)
+- [Key Features](#key-features)
+- [Architecture](#architecture)
+- [How Full-Duplex / Interruption Handling Works](#how-full-duplex--interruption-handling-works)
+- [Tool & Action Architecture](#tool--action-architecture)
+- [Model / Provider Details](#model--provider-details)
+- [FDB-v3 Benchmark](#fdb-v3-benchmark)
+- [Benchmark Results](#benchmark-results)
+- [Extension Use Case](#extension-use-case)
+- [Installation](#installation)
+- [Configuration / API Keys](#configuration--api-keys)
+- [Running the Agent](#running-the-agent)
+- [One-Command Reproduction](#one-command-reproduction)
+- [Testing](#testing)
+- [Project Structure](#project-structure)
+- [Reproducibility](#reproducibility)
+- [Limitations](#limitations)
+- [Demo Video](#demo-video)
+- [Team / Credits](#team--credits)
+- [References](#references)
 
-This project works with coding agents like [Claude Code](https://claude.com/product/claude-code), [Cursor](https://www.cursor.com/), and [Codex](https://openai.com/codex/).
+---
 
-LiveKit offers both a CLI and an [MCP server](https://docs.livekit.io/reference/developer-tools/docs-mcp/) for browsing and searching its documentation. Search returns short excerpts, so fetch the full page to read the details:
+## Project Overview
 
-```console
-lk docs search "testing my agent"
-lk docs get-page /testing/unit-tests
+Most voice agents work like this:
+
+```text
+User speaks
+    ↓
+STT
+    ↓
+LLM
+    ↓
+TTS
+    ↓
+Agent speaks
 ```
 
-The project also includes an [`AGENTS.md`](AGENTS.md) file and LiveKit's [agent skills](https://docs.livekit.io/intro/coding-agents/#agent-skills), so your coding agent follows LiveKit's best practices for workflows, handoffs, and testing, and tries its changes with the [agent debugger](https://docs.livekit.io/testing/debugger/). See the [coding agents guide](https://docs.livekit.io/intro/coding-agents/) for more details, including MCP server setup and how to update the skill.
+That works for simple conversations, but real users do not always wait quietly for an agent to finish.
 
-## Dev setup
+Our agent is built around a different idea:
 
-Install the [LiveKit CLI](https://docs.livekit.io/intro/basics/cli/), version 2.18.8 or later:
-
-- **macOS:** `brew install livekit-cli`
-- **Linux:** `curl -sSL https://get.livekit.io/cli | bash`
-- **Windows:** `winget install LiveKit.LiveKitCLI`
-
-Check your version with `lk --version`. To update an existing install, see [Update the CLI](https://docs.livekit.io/reference/developer-tools/livekit-cli/#updates).
-
-Then create a project from this template. The CLI clones the template and configures your environment:
-
-```console
-lk cloud auth
-lk agent init my-agent --template agent-starter-python
+```text
+User
+ │
+ │ speaks
+ ▼
+┌───────────────────────────────────────┐
+│        Full-Duplex Voice Agent        │
+│                                       │
+│  Listen ──► Reason ──► Act ──► Speak │
+│      ▲             │          │       │
+│      └── interrupt ┘          │       │
+│                               │       │
+│                 Tools ◄───────┘       │
+└───────────────────────────────────────┘
 ```
 
-<details>
-<summary>Set up the project manually</summary>
+The agent can continue working while the conversation changes, rather than treating every turn as an isolated request.
 
-Clone the repository and install dependencies into a virtual environment with [uv](https://docs.astral.sh/uv/):
+---
 
-```console
-git clone https://github.com/livekit-examples/agent-starter-python.git
-cd agent-starter-python
-uv sync
+## Problem Statement
+
+Traditional voice pipelines have a few practical problems:
+
+- The user may interrupt while the agent is speaking.
+- The user's latest statement may invalidate an action that was already being prepared.
+- Tool calls can take time while the user continues talking.
+- A stale response can be spoken after the user has already changed their request.
+- Repeating or retrying an action can accidentally execute a mutation twice.
+
+The goal of this project is to make voice interaction behave more like a real conversation:
+
+> **The latest user intent should matter, stale work should be discarded, and state-changing actions should not accidentally happen twice.**
+
+---
+
+## Key Features
+
+| Feature | Status |
+| --- | --- |
+| Real-time LiveKit voice agent | ✅ |
+| Full-duplex interaction | ✅ |
+| User interruption handling | ✅ |
+| Async tool execution | ✅ |
+| Stale-intent recovery | ✅ |
+| Exactly-once mutation handling | ✅ |
+| Function/tool calling | ✅ |
+| Tool latency simulation | ✅ |
+| Latency and tool-call tracking | ✅ |
+| Self-correction handling | ✅ |
+| Multi-step tool interactions | ✅ |
+| VisionGuide extension | ✅ |
+| YOLO11n scene detection | ✅ |
+| Voice access to current scene | ✅ |
+| Full-Duplex-Bench v3 evaluation | ✅ |
+
+---
+
+## Architecture
+
+```text
+                         ┌──────────────────┐
+                         │       USER       │
+                         │   Voice Input    │
+                         └────────┬─────────┘
+                                  │
+                                  ▼
+                         ┌──────────────────┐
+                         │       VAD        │
+                         │     Silero       │
+                         └────────┬─────────┘
+                                  │
+                                  ▼
+                         ┌──────────────────┐
+                         │       STT        │
+                         │  Deepgram Nova-3 │
+                         └────────┬─────────┘
+                                  │
+                                  ▼
+                    ┌──────────────────────────┐
+                    │          LLM             │
+                    │   GPT-4o-mini           │
+                    │   LiveKit Inference      │
+                    └───────────┬──────────────┘
+                                │
+                    ┌───────────┼───────────┐
+                    │           │           │
+                    ▼           ▼           ▼
+               ┌────────┐ ┌──────────┐ ┌───────────┐
+               │ Tools  │ │  Vision  │ │  Intent   │
+               │ / APIs │ │  Guide   │ │  Recovery │
+               └───┬────┘ └────┬─────┘ └─────┬─────┘
+                   │            │             │
+                   ▼            ▼             ▼
+              Mock APIs     YOLO11n       Latest Intent
+                   │        scene.json         │
+                   └────────────┬─────────────┘
+                                │
+                                ▼
+                         ┌──────────────┐
+                         │     TTS      │
+                         │ Cartesia     │
+                         │  Sonic-3     │
+                         └──────┬───────┘
+                                │
+                                ▼
+                              USER
 ```
 
-Sign up for [LiveKit Cloud](https://cloud.livekit.io/), then copy `.env.example` to `.env.local` and fill it in. To have the CLI write your project's URL and API keys into the file instead, run:
+---
 
-```console
-lk cloud auth
-lk app env --write --destination .env.local
+## How Full-Duplex / Interruption Handling Works
+
+The important difference is that the agent does not treat the conversation as:
+
+```text
+WAIT → PROCESS → SPEAK → FINISH → LISTEN
 ```
 
-</details>
+Instead, processing can overlap with the conversation:
 
-## Run the agent
-
-The `lk agent console`, `lk agent dev`, and `lk agent debugger` commands run your agent on your own machine. To talk to it in your terminal:
-
-```console
-lk agent console
+```text
+User speaks
+     │
+     ├──────────────► STT
+     │                  │
+     │                  ▼
+     │               LLM starts
+     │                  │
+     │                  ├──────► Tool call
+     │                  │
+User interrupts ────────┘
+     │
+     ▼
+Latest intent becomes authoritative
+     │
+     ├── cancel / ignore stale work
+     └── continue with updated request
 ```
 
-To connect it to LiveKit Cloud so a frontend, a phone call, or the [Agent Console](https://docs.livekit.io/testing/agent-console/) can reach it:
+### Interruption flow
 
-```console
-lk agent dev
+1. User starts speaking.
+2. VAD detects the new speech.
+3. The agent can stop or invalidate the current response.
+4. The new utterance is processed.
+5. If the new request changes the previous intent, stale work is not allowed to become the final response.
+6. The agent continues from the newest valid state.
+
+This is especially important when a tool call is already running.
+
+---
+
+## Tool & Action Architecture
+
+The agent uses tools for actions that should not be handled as plain LLM text.
+
+```text
+                    LLM
+                     │
+              chooses a tool
+                     │
+                     ▼
+              ┌──────────────┐
+              │ Action Layer │
+              └──────┬───────┘
+                     │
+          ┌──────────┼──────────┐
+          ▼          ▼          ▼
+       Travel     Finance    Housing
+          │          │          │
+          └──────────┼──────────┘
+                     ▼
+                E-commerce
 ```
 
-To let a coding agent or a script test it one text turn at a time, use the [agent debugger](https://docs.livekit.io/testing/debugger/). Each turn prints the agent's reply along with the tool calls and handoffs behind it:
+The repository currently uses simulated APIs for travel, finance, housing, and e-commerce operations.
 
-```console
-lk agent debugger start
-lk agent debugger say "Hi, what can you do?"
-lk agent debugger stop
+These mock APIs are useful for testing tool behaviour and latency without performing real transactions.
+
+### Stale Intent
+
+A tool result is not automatically trusted just because it finishes successfully.
+
+The agent checks whether the result still belongs to the current user intent.
+
+```text
+Request A
+   ↓
+Tool A starts
+   ↓
+User says "Actually, do B"
+   ↓
+Intent changes
+   ↓
+Tool A result becomes stale
+   ↓
+Do not use stale result as the final action
 ```
 
-In production, run the agent directly:
+### Exactly-Once Mutations
 
-```console
-uv run src/agent.py start
+For state-changing actions, the goal is:
+
+```text
+One user action
+      ↓
+One committed mutation
 ```
 
-## Frontends and telephony
+rather than:
 
-Pair the agent with a prebuilt frontend starter, or add telephony:
-
-| Platform | Link | Description |
-|----------|----------|-------------|
-| **Web** | [`livekit-examples/agent-starter-react`](https://github.com/livekit-examples/agent-starter-react) | Web voice AI assistant with React & Next.js |
-| **iOS/macOS** | [`livekit-examples/agent-starter-swift`](https://github.com/livekit-examples/agent-starter-swift) | Native iOS, macOS, and visionOS voice AI assistant |
-| **Flutter** | [`livekit-examples/agent-starter-flutter`](https://github.com/livekit-examples/agent-starter-flutter) | Cross-platform voice AI assistant app |
-| **React Native** | [`livekit-examples/voice-assistant-react-native`](https://github.com/livekit-examples/voice-assistant-react-native) | Native mobile app with React Native & Expo |
-| **Android** | [`livekit-examples/agent-starter-android`](https://github.com/livekit-examples/agent-starter-android) | Native Android app with Kotlin & Jetpack Compose |
-| **Web Embed** | [`livekit-examples/agent-starter-embed`](https://github.com/livekit-examples/agent-starter-embed) | Voice AI widget for any website |
-| **Telephony** | [Documentation](https://docs.livekit.io/telephony/) | Add inbound or outbound calling to your agent |
-
-For more options, see the [frontend guide](https://docs.livekit.io/frontends/).
-
-## Testing and debugging
-
-Simulations run full multi-turn conversations between a simulated user and your agent on LiveKit Cloud, then judge each transcript. The scenarios live in [`scenarios.yaml`](scenarios.yaml). Run them locally with the CLI:
-
-```console
-lk agent simulate text --scenarios scenarios.yaml
+```text
+retry → retry → duplicate action
 ```
 
-The `Simulations` workflow in [`.github/workflows/simulations.yml`](.github/workflows/simulations.yml) runs the same file on every merge to `main`, and on demand from the Actions tab. It doesn't run on every pull request push because each run uses real inference. See the [simulations guide](https://docs.livekit.io/testing/simulations/) for how to write scenarios and read results.
+This is important for any future real-world integration involving bookings, purchases, account changes, or other state-changing operations.
 
-To check a change turn by turn without a live session, use the [agent debugger](https://docs.livekit.io/testing/debugger/) shown in [Run the agent](#run-the-agent).
+---
 
-To debug a running agent, open it in the [Agent Console](https://docs.livekit.io/testing/agent-console/). It shows events, tool calls, and model timing as you talk to the agent. To stream logs from a deployed agent, run `lk agent logs`.
+## Model / Provider Details
 
-## Using this template for your own project
+| Component | Provider / Model |
+| --- | --- |
+| Voice infrastructure | LiveKit Agents |
+| VAD | Silero |
+| STT | Deepgram Nova-3 |
+| LLM | OpenAI GPT-4o-mini via LiveKit Inference |
+| TTS | Cartesia Sonic-3 |
+| Noise cancellation | LiveKit Background Noise Cancellation |
+| Vision detection | Ultralytics YOLO11n |
+| Camera processing | OpenCV |
 
-After you create your own project from this template:
+The project does **not** depend on the older Gemma/Fish Audio configuration from the original starter setup.
 
-- **Commit `uv.lock`.** The template doesn't track it, but your project should, for reproducible builds. If you deploy to LiveKit Cloud, commit `livekit.toml` too.
-- **Add repository secrets.** Add `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` as [repository secrets](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-what-your-workflow-does/using-secrets-in-github-actions) so the simulations can run in CI.
+---
 
-## Deploying to production
+## FDB-v3 Benchmark
 
-To deploy the agent to LiveKit Cloud or another environment with the included `Dockerfile`, see the [deployment guide](https://docs.livekit.io/deploy/agents/).
+The project was built and evaluated using **Full-Duplex-Bench v3**.
 
-## Self-hosted LiveKit
+The benchmark is useful because normal chatbot testing does not fully capture what happens when users:
 
-You can self-host LiveKit instead of using LiveKit Cloud. See the [self-hosting guide](https://docs.livekit.io/transport/self-hosting/local/). If you self-host, use [model plugins](https://docs.livekit.io/agents/models/#plugins) instead of LiveKit Inference, and remove the [LiveKit Cloud noise cancellation](https://docs.livekit.io/transport/media/noise-cancellation/) plugin.
+- interrupt the agent,
+- correct themselves,
+- change intent,
+- trigger multiple tools,
+- or continue speaking while an action is running.
+
+The evaluation process was used to identify failures and iterate on:
+
+- interruption handling,
+- self-correction,
+- tool chains,
+- stale responses,
+- and conversational latency.
+
+---
+
+## Benchmark Results
+
+Current recorded benchmark run:
+
+| Metric | Result |
+| --- | ---: |
+| Scenarios tested | **100** |
+| Task completion | **88 / 100** |
+| Recorded latency | **381 ms** |
+
+These numbers are from the current benchmark run and should be treated as the result of this version of the agent, not as a universal performance guarantee.
+
+The benchmark work also exposed the main remaining issues: interruption quality, fragmented STT, and failures in some complex multi-step interactions.
+
+---
+
+## Extension Use Case
+
+### VisionGuide — Voice + Vision Assistant
+
+Beyond the benchmark, the project was extended with **VisionGuide**.
+
+VisionGuide adds a camera pipeline:
+
+```text
+Webcam
+  ↓
+OpenCV
+  ↓
+YOLO11n
+  ↓
+Object detection
+  ↓
+Position estimation
+  ↓
+Rough proximity
+  ↓
+scene.json
+  ↓
+get_current_scene()
+  ↓
+Voice Agent
+```
+
+The user can ask the voice agent about the current surroundings.
+
+Example:
+
+```text
+User:
+"What is around me?"
+
+Agent:
+"There's an object slightly to your left..."
+```
+
+VisionGuide can identify configured objects and estimate whether they are on the left, center, or right.
+
+### Why this extension?
+
+It gives the full-duplex architecture a real end-to-end use case where:
+
+- the user talks naturally,
+- the agent reasons about the request,
+- the agent accesses a tool,
+- the tool reads live visual context,
+- and the result is returned through voice.
+
+> VisionGuide is experimental and is not intended for safety-critical navigation.
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Python
+- LiveKit project
+- LiveKit credentials
+- Required provider API credentials
+- Webcam if using VisionGuide
+
+### Clone
+
+```bash
+git clone <your-repository-url>
+cd interruptible-agent
+```
+
+### Install dependencies
+
+Install the dependencies defined by `pyproject.toml`.
+
+The voice-agent dependencies and the VisionGuide dependencies are separate concerns. VisionGuide uses OpenCV and Ultralytics, which are imported by the vision code.
+
+---
+
+## Configuration / API Keys
+
+Create:
+
+```text
+.env
+```
+
+using:
+
+```text
+.env.example
+```
+
+as the reference.
+
+The environment should contain the credentials required by the LiveKit and model providers used by the agent.
+
+Do **not** commit `.env` or API keys.
+
+Typical provider configuration includes:
+
+```text
+LIVEKIT_URL=...
+LIVEKIT_API_KEY=...
+LIVEKIT_API_SECRET=...
+```
+
+Any additional provider credentials required by the current project should be added according to the existing `.env.example`.
+
+---
+
+## Running the Agent
+
+The main entry point is:
+
+```text
+src/agent.py
+```
+
+Run the local agent with:
+
+```bash
+python src/agent.py dev
+```
+
+The agent connects to LiveKit and starts the voice session.
+
+### Running VisionGuide
+
+VisionGuide runs independently:
+
+```text
+vision_guide/vision.py
+```
+
+It updates:
+
+```text
+vision_guide/scene.json
+```
+
+The LiveKit agent reads the latest scene through the `get_current_scene` tool.
+
+The camera process is **not automatically started by the voice-agent entry point**.
+
+---
+
+## One-Command Reproduction
+
+After installing dependencies and configuring `.env`:
+
+```bash
+python src/agent.py dev
+```
+
+This starts the main voice-agent workflow.
+
+For the complete benchmark reproduction, use the Full-Duplex-Bench v3 runner included in the repository and the benchmark data/configuration supplied with the project.
+
+---
+
+## Testing
+
+The repository contains:
+
+```text
+tests/
+scenarios.yaml
+Full-Duplex-Bench/
+```
+
+Testing should cover:
+
+- Basic voice conversations
+- Interruptions while speaking
+- User corrections
+- Stale tool results
+- Multi-step tool calls
+- Tool latency
+- Repeated state-changing requests
+- Vision queries
+- Benchmark scenarios
+
+### Manual interruption test
+
+Try:
+
+```text
+User:
+"Book me a..."
+
+Agent starts responding
+
+User:
+"Actually, don't book it. Just tell me the price."
+```
+
+The important behaviour is that the second instruction becomes the active intent and the earlier action should not continue into an unintended final mutation.
+
+---
+
+## Project Structure
+
+```text
+interruptible-agent/
+│
+├── src/
+│   ├── agent.py              # Main LiveKit voice agent
+│   ├── mock_apis.py          # Simulated service operations
+│   └── latency_injector.py   # Tool latency simulation
+│
+├── vision_guide/
+│   ├── vision.py             # Webcam + YOLO11n pipeline
+│   ├── navigation.py         # Detection / guidance logic
+│   ├── scene.json            # Latest scene snapshot
+│   └── yolo11n.pt            # YOLO11n model
+│
+├── tests/                    # Tests
+├── Full-Duplex-Bench/        # FDB-v3 benchmark
+├── scenarios.yaml            # Conversation scenarios
+│
+├── pyproject.toml            # Python project configuration
+├── Dockerfile                # Voice-agent container
+├── .env.example              # Environment template
+├── LICENSE
+├── interruptible_agent.mp4   # Demo video
+└── README.md
+```
+
+---
+
+## Reproducibility
+
+The repository keeps the main pieces needed to reproduce the project:
+
+- Agent source code
+- Tool implementations
+- Vision pipeline
+- Benchmark scenarios
+- Configuration templates
+- Docker configuration
+- Evaluation resources
+- Demo video
+
+For a clean reproduction:
+
+```text
+1. Clone repository
+2. Install dependencies
+3. Configure .env
+4. Start LiveKit agent
+5. Run VisionGuide separately if needed
+6. Run FDB-v3 evaluation
+7. Compare results with the recorded benchmark run
+```
+
+The benchmark result reported above belongs to the tested version of the agent and may change with model/provider versions, network conditions, hardware, and configuration.
+
+---
+
+## Limitations
+
+1. **Interruption is not perfect** — low-volume or poorly detected speech can still fail to interrupt the agent.
+2. **STT fragmentation** — speech may sometimes be split into smaller chunks.
+3. **Latency** — STT, LLM, tool execution, and TTS all contribute to end-to-end delay.
+4. **Complex tool chains** — longer multi-step interactions can still fail.
+5. **Mock APIs** — the current travel, finance, housing, and e-commerce tools do not perform real-world transactions.
+6. **Vision accuracy** — YOLO performance depends on lighting, camera position, and the detected object.
+7. **No true depth estimation** — VisionGuide uses a bounding-box-based proximity heuristic rather than physical distance.
+8. **Separate camera process** — VisionGuide is not automatically started with the LiveKit agent.
+9. **Safety** — VisionGuide should not be used as a safety-critical navigation system.
+10. **Provider dependency** — the voice pipeline depends on external model/provider services.
+
+---
+
+## Demo Video
+
+### Full Demo
+
+[**▶ Watch `interruptible_agent.mp4`**](./interruptible_agent.mp4)
+
+The demo covers the voice interaction, interruption behaviour, tool usage, and the extended VisionGuide use case.
+
+---
+
+## Team / Credits
+
+**Project:** Interruptible Full-Duplex Voice Agent
+
+**Track:** Samsung PRISM / Full-Duplex-Bench v3
+
+Built using:
+
+- LiveKit
+- Deepgram
+- OpenAI
+- Cartesia
+- Silero
+- Ultralytics YOLO
+
+Team members / contributors are listed in the repository commit history and project submission.
+
+---
+
+## References
+
+- [LiveKit Agents](https://docs.livekit.io/agents/)
+- [Full-Duplex-Bench](https://github.com/ServiceNow/Full-Duplex-Bench)
+- [Deepgram](https://deepgram.com/)
+- [OpenAI](https://openai.com/)
+- [Cartesia](https://cartesia.ai/)
+- [Ultralytics](https://docs.ultralytics.com/)
+
+---
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+See [`LICENSE`](LICENSE) for license details.
