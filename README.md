@@ -1,4 +1,4 @@
-# Interruptible Agent — Full-Duplex Voice Assistant
+# Vision: Interruptible Agent — Full-Duplex Voice Assistant
 
 **A full-duplex voice agent that can listen, respond, get interrupted, recover from stale intent, and safely execute actions.**
 
