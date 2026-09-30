@@ -1,0 +1,17 @@
+[project]
+name = "livekit-voice-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "ffmpeg-python>=0.2.0",
+    "livekit-agents[silero,turn-detector]>=1.8.3",
+    "livekit-plugins-assemblyai>=1.8.3",
+    "livekit-plugins-cartesia>=1.8.3",
+    "livekit-plugins-noise-cancellation>=0.3.2",
+    "livekit-plugins-openai>=1.8.3",
+    "livekit[crypto]~=1.0",
+    "nemo-toolkit[asr]>=3.0.0",
+    "numpy>=2.4.6",
+    "pydub>=0.25.1",
+    "python-dotenv>=1.2.3",
+]
